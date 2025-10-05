@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mapillary Embed</title>
+  <style>
+    /* optional: make it responsive */
+    .embed-wrap { position: relative; width: 100%; max-width: 960px; margin: 0 auto; }
+    .embed-wrap::before { content: ""; display: block; padding-top: 50%; } /* 2:1 ratio */
+    .embed-wrap iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  </style>
+</head>
+<body>
+  <div class="embed-wrap">
+    <iframe
+      src="https://www.mapillary.com/embed?map_style=Esri%20navigation&image_key=744575191439794&x=0.49999999999999994&y=0.49999999999999994&style=split"
+      frameborder="0"
+      allowfullscreen
+      loading="lazy"
+      referrerpolicy="no-referrer-when-downgrade">
+    </iframe>
+  </div>
+</body>
+</html>
