@@ -1,11 +1,219 @@
 <!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <meta http-equiv="refresh" content="0; url=https://www.mapillary.com/app/user/HKocen?lat=30.142297782872475&lng=-91.95461693413756&z=12.5877524578224&username%5B%5D=HKocen&pKey=744575191439794">
-    <title>Redirecting…</title>
-  </head>
-  <body>
-    <p>Redirecting to Mapillary…</p>
-  </body>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mapillary – HKocen | Viewer + Map</title>
+
+  <!-- MapillaryJS -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/mapillary-js@latest/dist/mapillary.css" />
+  <script src="https://cdn.jsdelivr.net/npm/mapillary-js@latest/dist/mapillary.min.js"></script>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #wrap { height: 100%; width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
+    #mly { position: relative; }
+    #map { position: relative; }
+    #topbar {
+      position: absolute; z-index: 1000; top: 8px; left: 8px;
+      background: rgba(0,0,0,.6); color: #fff; padding: 6px 10px; border-radius: 8px;
+      font: 12px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+    #status { opacity: .85; }
+    .marker-active {
+      outline: 2px solid #000; border: 2px solid #fff; border-radius: 50%;
+    }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="mly"></div>
+    <div id="map">
+      <div id="topbar">
+        <div><strong>HKocen</strong> images</div>
+        <div id="status">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // === Config ===
+    const MAPILLARY_TOKEN = "YOUR_MAPILLARY_ACCESS_TOKEN"; // e.g., MLY|2446...|7b44...
+    const USERNAME = "HKocen";
+    const START = { lat: 30.1423, lng: -91.9546, zoom: 13 };  // starting map/viewer area
+    const PAGE_LIMIT = 250;   // images per request (max 1000, smaller keeps it snappy)
+    const MAX_POINTS = 2000;  // safety cap on total plotted points
+
+    // === Viewer ===
+    const viewer = new Mapillary.Viewer({
+      accessToken: MAPILLARY_TOKEN,
+      container: "mly",
+      imageId: null, // we'll set after first fetch
+      component: { cover: false, attribution: true }
+    });
+
+    // === Map ===
+    const map = L.map("map", { zoomControl: true }).setView([START.lat, START.lng], START.zoom);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 20, attribution: "&copy; OpenStreetMap"
+    }).addTo(map);
+
+    // Storage for markers keyed by image id
+    const markersById = new Map();
+    let activeMarker = null;
+
+    // Utility: tiny DOM helpers
+    const $status = document.getElementById("status");
+    const setStatus = (t) => $status.textContent = t;
+
+    // === Fetch & plot images for current map bounds, filtered to USERNAME ===
+    async function fetchImagesForBounds(bounds) {
+      const sw = bounds.getSouthWest();
+      const ne = bounds.getNorthEast();
+      const bbox = [sw.lng, sw.lat, ne.lng, ne.lat].join(",");
+      const fields = [
+        "id",
+        "captured_at",
+        "computed_geometry",
+        "thumb_256_url",
+        "compass_angle"
+      ].join(",");
+
+      // Graph API endpoint:
+      // - filter by usernames (Mapillary resolves that to the uploader)
+      // - bbox limits results to current map view
+      // - fields controls what we receive back
+      // - paging handled via 'next' cursors
+      const base = `https://graph.mapillary.com/images?fields=${encodeURIComponent(fields)}&usernames=${encodeURIComponent(USERNAME)}&bbox=${encodeURIComponent(bbox)}&limit=${PAGE_LIMIT}`;
+
+      let url = base;
+      let count = 0;
+      const items = [];
+
+      setStatus("Loading images…");
+
+      while (url && count < MAX_POINTS) {
+        const res = await fetch(url, { headers: { Authorization: `OAuth ${MAPILLARY_TOKEN}` } });
+        if (!res.ok) throw new Error(`Graph API ${res.status}`);
+        const data = await res.json();
+        if (Array.isArray(data.data)) {
+          for (const img of data.data) {
+            items.push(img);
+            count++;
+            if (count >= MAX_POINTS) break;
+          }
+        }
+        url = (data.paging && data.paging.next) ? data.paging.next : null;
+      }
+
+      setStatus(`Loaded ${items.length} photo${items.length === 1 ? "" : "s"}.`);
+      return items;
+    }
+
+    function clearMarkers() {
+      for (const m of markersById.values()) {
+        map.removeLayer(m);
+      }
+      markersById.clear();
+      activeMarker = null;
+    }
+
+    function addMarkers(images) {
+      const icon = (selected) => L.divIcon({
+        className: "",
+        html:
+          `<div style="
+            width:${selected ? 16 : 12}px;height:${selected ? 16 : 12}px;
+            background:${selected ? 'rgba(0,123,255,.95)' : 'rgba(0,123,255,.75)'};
+            border:2px solid #fff;border-radius:50%;box-shadow:0 0 0 1px rgba(0,0,0,.25);
+          "></div>`,
+        iconSize: [16,16],
+        iconAnchor: [8,8]
+      });
+
+      images.forEach(img => {
+        const coords = img.computed_geometry && img.computed_geometry.coordinates;
+        if (!coords || coords.length < 2) return;
+        const lat = coords[1], lng = coords[0];
+
+        const marker = L.marker([lat, lng], { icon: icon(false), keyboard: false });
+        marker.addTo(map);
+        marker.on("click", () => viewer.moveTo(img.id).catch(console.error));
+        marker.bindTooltip(new Date(img.captured_at).toLocaleString(), { direction: "top" });
+
+        markersById.set(img.id, marker);
+      });
+    }
+
+    function highlightMarker(imageId) {
+      if (activeMarker) {
+        // revert previous
+        activeMarker.setIcon(L.divIcon({
+          html:`<div style="width:12px;height:12px;background:rgba(0,123,255,.75);border:2px solid #fff;border-radius:50%;box-shadow:0 0 0 1px rgba(0,0,0,.25);"></div>`,
+          iconSize:[16,16], iconAnchor:[8,8]
+        }));
+      }
+      const m = markersById.get(imageId);
+      if (m) {
+        m.setIcon(L.divIcon({
+          html:`<div style="width:16px;height:16px;background:rgba(0,123,255,.95);border:2px solid #fff;border-radius:50%;box-shadow:0 0 0 1px rgba(0,0,0,.25);"></div>`,
+          iconSize:[16,16], iconAnchor:[8,8]
+        }));
+        activeMarker = m;
+      }
+    }
+
+    // Keep viewer + map in sync
+    viewer.on("image", (ev) => {
+      const id = ev && ev.image && ev.image.id ? ev.image.id : ev.imageId || ev.id;
+      if (!id) return;
+      highlightMarker(id);
+      const m = markersById.get(id);
+      if (m) {
+        const pt = m.getLatLng();
+        if (!map.getBounds().pad(-0.2).contains(pt)) {
+          map.panTo(pt, { animate: true });
+        }
+      }
+    });
+
+    // Fetch & plot whenever map stops moving
+    let inFlight = 0;
+    let lastFetch = 0;
+
+    async function refresh() {
+      const myFetchId = ++inFlight;
+      try {
+        clearMarkers();
+        const imgs = await fetchImagesForBounds(map.getBounds());
+        if (myFetchId !== inFlight) return; // a newer fetch started; drop these
+        addMarkers(imgs);
+        // Set the viewer to the first image if none is shown
+        if (!viewer.getImageId() && imgs.length) {
+          await viewer.moveTo(imgs[0].id);
+        }
+      } catch (e) {
+        console.error(e);
+        setStatus(`Error loading images: ${e.message}`);
+      } finally {
+        lastFetch = Date.now();
+      }
+    }
+
+    map.on("moveend", () => {
+      // simple debounce: avoid hammering the API on tiny pans
+      const delta = Date.now() - lastFetch;
+      if (delta > 400) refresh();
+    });
+
+    // Initial load
+    (async function init() {
+      await refresh();
+    })();
+  </script>
+</body>
 </html>
